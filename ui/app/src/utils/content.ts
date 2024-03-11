@@ -76,6 +76,7 @@ import slugify from 'slugify';
 import { showCodeEditorDialog, showEditDialog } from '../state/actions/dialogs';
 import { Dispatch } from 'react';
 import { AnyAction } from 'redux';
+import { findParentModelId, getModelIdFromInheritedField, isInheritedField } from './model';
 
 export function isEditableAsset(path: string) {
   return (
@@ -372,13 +373,25 @@ const systemPropsList = [
   'lastModifiedDate_dt'
 ];
 
+/**
+ * doc {XMLDocument}
+ * path {string}
+ * contentTypesLookup {LookupTable<ContentType>}
+ * instanceLookup {LookupTable<ContentInstance>}
+ * unflattenedPaths {LookupTable<ContentInstance>} A lookup table directly completed/mutated by this function indexed by path of those objects that are incomplete/unflattened
+ */
 export function parseContentXML(
   doc: XMLDocument,
   path: string = null,
   contentTypesLookup: LookupTable<ContentType>,
-  instanceLookup: LookupTable<ContentInstance>
+  instanceLookup: LookupTable<ContentInstance>,
+  unflattenedPaths?: LookupTable<ContentInstance>
 ): ContentInstance {
-  const id = nnou(doc) ? getInnerHtml(doc.querySelector(':scope > objectId')) : fileNameFromPath(path);
+  let id = nnou(doc) ? getInnerHtml(doc.querySelector(':scope > objectId')) : null;
+  if (id === null && !/^[a-f\d]{4}(?:[a-f\d]{4}-){4}[a-f\d]{12}$/i.test((id = fileNameFromPath(path)))) {
+    // If the id is not a guid by now, then is simply not available at this time.
+    id = null;
+  }
   const contentTypeId = nnou(doc) ? getInnerHtml(doc.querySelector(':scope > content-type')) : null;
   const current = {
     craftercms: {
@@ -389,9 +402,13 @@ export function parseContentXML(
       dateCreated: null,
       dateModified: null,
       contentTypeId: contentTypeId,
+      disabled: false,
       sourceMap: {}
     }
   };
+  if (id === null && unflattenedPaths) {
+    unflattenedPaths[path] = current;
+  }
   if (nnou(doc)) {
     current.craftercms.label = getInnerHtml(
       doc.querySelector(':scope > internal-name') ?? doc.querySelector(':scope > file-name'),
@@ -400,7 +417,7 @@ export function parseContentXML(
     current.craftercms.dateCreated = getInnerHtml(doc.querySelector(':scope > createdDate_dt'));
     current.craftercms.dateModified = getInnerHtml(doc.querySelector(':scope > lastModifiedDate_dt'));
   }
-  instanceLookup[id] = current;
+  id && (instanceLookup[id] = current);
   if (nnou(doc)) {
     Array.from(doc.documentElement.children).forEach((element: Element) => {
       const tagName = element.tagName;
@@ -433,18 +450,32 @@ export function parseContentXML(
             );
           }
         }
-        current[tagName] = parseElementByContentType(element, field, contentTypesLookup, instanceLookup);
+        current[tagName] = parseElementByContentType(
+          element,
+          field,
+          contentTypesLookup,
+          instanceLookup,
+          unflattenedPaths
+        );
       }
     });
   }
   return current;
 }
 
+/**
+ * element {Element}
+ * field {ContentTypeField}
+ * contentTypesLookup {LookupTable<ContentType>}
+ * instanceLookup {LookupTable<ContentInstance>}
+ * unflattenedPaths {LookupTable<ContentInstance>} A lookup table directly completed/mutated by this function indexed by path of those objects that are incomplete/unflattened
+ */
 function parseElementByContentType(
   element: Element,
   field: ContentTypeField,
   contentTypesLookup: LookupTable<ContentType>,
-  instanceLookup: LookupTable<ContentInstance>
+  instanceLookup: LookupTable<ContentInstance>,
+  unflattenedPaths?: LookupTable<ContentInstance>
 ) {
   if (!field) {
     return getInnerHtml(element) ?? '';
@@ -466,7 +497,8 @@ function parseElementByContentType(
             fieldTag,
             field.fields[fieldTagName],
             contentTypesLookup,
-            instanceLookup
+            instanceLookup,
+            unflattenedPaths
           );
         });
         array.push(repeatItem);
@@ -485,27 +517,36 @@ function parseElementByContentType(
         });
       } else {
         items.forEach((item) => {
-          let path = getInnerHtml(item.querySelector(':scope > include'));
-          const component = item.querySelector(':scope > component');
-          const itemKey = getInnerHtml(item.querySelector(':scope > key'));
-          if (!path && !component) {
-            path = itemKey;
-          }
-          // Embedded components have no .xml in their key
-          const isFile = Boolean(itemKey) && !itemKey.endsWith('.xml') && Boolean(!item.getAttribute('inline'));
-          if (isFile) {
-            array.push({
-              key: itemKey,
-              value: getInnerHtml(item.querySelector(':scope > value'))
-            });
+          const key = getInnerHtml(item.querySelector(':scope > key'));
+          if (key) {
+            // Note: as it stands, taxonomies would be considered as "files" and not expanded/parsed as components.
+            const isFile =
+              // If the `key` tag value is not a path rooted at `/site/website` or `/site/components`
+              // or not an `xml` would mean is something other than content (asset, template, script, etc).
+              key.match(/^\/site\/(website|components)\/.+\.xml$/) === null &&
+              // Embedded components don't have a path as the value of `key` (the guid is the value),
+              // but/and they have an `inline` attribute.
+              item.getAttribute('inline') !== 'true';
+            if (isFile) {
+              array.push({
+                key,
+                value: getInnerHtml(item.querySelector(':scope > value'))
+              });
+            } else {
+              const component = item.querySelector(':scope > component');
+              const path = getInnerHtml(item.querySelector(':scope > include')) || (!component ? key : null);
+              const instance = parseContentXML(
+                component ? wrapElementInAuxDocument(component) : null,
+                path,
+                contentTypesLookup,
+                instanceLookup,
+                unflattenedPaths
+              );
+              array.push(instance);
+            }
           } else {
-            const instance = parseContentXML(
-              component ? wrapElementInAuxDocument(component) : null,
-              path,
-              contentTypesLookup,
-              instanceLookup
-            );
-            array.push(instance);
+            // Not sure if there can be a case without a `key`. Leaving this case based on the previous code checking for it.
+            array.push(item);
           }
         });
       }
@@ -576,6 +617,8 @@ export const createModelHierarchyDescriptor: (
 });
 // endregion
 
+let contentTypeMissingWarningQueue = [];
+let contentTypeMissingWarningTimeout: NodeJS.Timeout;
 export function createModelHierarchyDescriptorMap(
   normalizedModels: LookupTable<ContentInstance>,
   contentTypes: LookupTable<ContentType>
@@ -586,11 +629,21 @@ export function createModelHierarchyDescriptorMap(
     contentTypes[contentTypeId]?.fields ? Object.values(contentTypes[contentTypeId]?.fields) : null;
   const cleanCarryOver = (carryOver: string) => carryOver.replace(/(^\.+)|(\.+$)/g, '').replace(/\.{2,}/g, '.');
   const contentTypeMissingWarning = (model: ContentInstance) => {
-    if (!contentTypes[model.craftercms.contentTypeId]) {
-      console.error(
-        `[createModelHierarchyDescriptorMap] Content type with id ${model.craftercms.contentTypeId} was not found. ` +
-          `Unable to fully process model at '${model.craftercms.path}' with id ${model.craftercms.id}`
+    // Show this warning only if the model has a content type id defined (not null),
+    // but it's not present in the content type lookup table.
+    if (model.craftercms.contentTypeId && !contentTypes[model.craftercms.contentTypeId]) {
+      contentTypeMissingWarningQueue.push(
+        `Content type with id "${model.craftercms.contentTypeId}" was not found. ` +
+          `Unable to fully process model at "${model.craftercms.path}" with id "${model.craftercms.id}"`
       );
+      clearTimeout(contentTypeMissingWarningTimeout);
+      contentTypeMissingWarningTimeout = setTimeout(() => {
+        console.log(
+          `%c[createModelHierarchyDescriptorMap]: \n- ${contentTypeMissingWarningQueue.join('\n- ')}`,
+          'color: #f00'
+        );
+        contentTypeMissingWarningQueue = [];
+      }, 200);
     }
   };
   // endregion
@@ -741,7 +794,7 @@ export function createChildModelLookup(
   return lookup;
 }
 
-export function normalizeModelsLookup(models: LookupTable<ContentInstance>) {
+export function normalizeModelsLookup(models: LookupTable<ContentInstance>): LookupTable<ContentInstance> {
   const lookup = {};
   Object.entries(models).forEach(([id, model]) => {
     lookup[id] = normalizeModel(model);
@@ -908,7 +961,7 @@ export const createItemActionMap: (availableActions: number) => ItemActionsMap =
 });
 
 export function lookupItemByPath<T = DetailedItem>(path: string, lookupTable: LookupTable<T>): T {
-  return lookupTable[withoutIndex(path)] ?? lookupTable[withIndex(path)];
+  return lookupTable[withIndex(path)] ?? lookupTable[withoutIndex(path)];
 }
 
 export function modelsToLookup(models: ContentInstance[]): LookupTable<ContentInstance> {
@@ -1066,4 +1119,23 @@ export function generateComponentBasePath(contentType: string) {
 
 export function generateComponentPath(modelId: string, contentType: string) {
   return `${generateComponentBasePath(contentType)}/${modelId}.xml`;
+}
+
+/**
+ * If the field is inherited, swaps the modelId and parentModelId with
+ * the inheritance parent's. */
+export function getInheritanceParentIdsForField(
+  fieldId: string,
+  modelLookup: LookupTable<ContentInstance>,
+  modelId: string,
+  parentModelId: string,
+  modelIdByPath: LookupTable<string>,
+  hierarchyMap: ModelHierarchyMap
+): { modelId: string; parentModelId: string } {
+  const ids = { modelId, parentModelId };
+  if (isInheritedField(modelLookup[modelId], fieldId)) {
+    ids.modelId = getModelIdFromInheritedField(modelLookup[modelId], fieldId, modelIdByPath);
+    ids.parentModelId = findParentModelId(modelId, hierarchyMap, modelLookup);
+  }
+  return ids;
 }

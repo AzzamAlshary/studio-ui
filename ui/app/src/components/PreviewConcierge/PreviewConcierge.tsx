@@ -38,8 +38,10 @@ import {
   hostCheckIn,
   hotKey,
   iceZoneSelected,
+  initPreviewConfig,
   initRichTextEditorConfig,
   insertComponentOperation,
+  InsertComponentOperationPayload,
   insertItemOperation,
   insertItemOperationComplete,
   insertItemOperationFailed,
@@ -59,6 +61,7 @@ import {
   setItemBeingDragged,
   setPreviewEditMode,
   showEditDialog as showEditDialogAction,
+  snackGuestMessage,
   sortItemOperation,
   sortItemOperationComplete,
   sortItemOperationFailed,
@@ -67,13 +70,9 @@ import {
   updateFieldValueOperation,
   updateFieldValueOperationComplete,
   updateFieldValueOperationFailed,
-  updateRteConfig,
-  snackGuestMessage,
-  InsertComponentOperationPayload,
-  initPreviewConfig
+  updateRteConfig
 } from '../../state/actions/preview';
 import {
-  writeInstance,
   deleteItem,
   duplicateItem,
   fetchContentInstance,
@@ -86,11 +85,12 @@ import {
   insertItem,
   moveItem,
   sortItem,
-  updateField
+  updateField,
+  writeInstance
 } from '../../services/content';
-import { filter, map, switchMap, takeUntil } from 'rxjs/operators';
-import { forkJoin, Observable, of } from 'rxjs';
-import { FormattedMessage, useIntl } from 'react-intl';
+import { filter, map, switchMap, take, takeUntil } from 'rxjs/operators';
+import { BehaviorSubject, forkJoin, Observable, of } from 'rxjs';
+import { useIntl } from 'react-intl';
 import { getGuestToHostBus, getHostToGuestBus, getHostToHostBus } from '../../utils/subjects';
 import { useDispatch, useStore } from 'react-redux';
 import { nnou } from '../../utils/object';
@@ -102,8 +102,8 @@ import {
   getStoredEditModeChoice,
   getStoredEditModePadding,
   getStoredHighlightModeChoice,
-  removeStoredClipboard,
   getStoredOutdatedXBValidationDate,
+  removeStoredClipboard,
   setStoredOutdatedXBValidationDate
 } from '../../utils/state';
 import {
@@ -117,6 +117,7 @@ import EditFormPanel from '../EditFormPanel/EditFormPanel';
 import {
   createModelHierarchyDescriptorMap,
   getComputedEditMode,
+  getInheritanceParentIdsForField,
   getNumOfMenuOptionsForItem,
   hasEditAction,
   isItemLockedForMe,
@@ -126,9 +127,6 @@ import {
 } from '../../utils/content';
 import moment from 'moment-timezone';
 import ContentInstance from '../../models/ContentInstance';
-import LookupTable from '../../models/LookupTable';
-import Snackbar from '@mui/material/Snackbar';
-import CloseRounded from '@mui/icons-material/CloseRounded';
 import IconButton from '@mui/material/IconButton';
 import { useSelection } from '../../hooks/useSelection';
 import { usePreviewState } from '../../hooks/usePreviewState';
@@ -183,17 +181,12 @@ import { DetailedItem, MediaItem } from '../../models';
 import DataSourcesActionsList, { DataSourcesActionsListProps } from '../DataSourcesActionsList/DataSourcesActionsList';
 import { editControllerActionCreator, itemActionDispatcher } from '../../utils/itemActions';
 import useEnv from '../../hooks/useEnv';
-import useAuth from '../../hooks/useAuth';
 import { getOffsetLeft, getOffsetTop } from '@mui/material/Popover';
 import { isSameDay } from '../../utils/datetime';
 import compatibilityList from './compatibilityList';
+import ContentType from '../../models/ContentType';
 
 const originalDocDomain = document.domain;
-
-const startCommunicationDetectionTimeout = (timeoutRef, setShowSnackbar, timeout = 5000) => {
-  clearTimeout(timeoutRef.current);
-  timeoutRef.current = setTimeout(() => setShowSnackbar(true), timeout);
-};
 
 // region const issueDescriptorRequest = () => {...}
 const issueDescriptorRequest = (props) => {
@@ -215,11 +208,11 @@ const issueDescriptorRequest = (props) => {
       // If another check in comes while loading, this request should be cancelled.
       // This may happen if navigating rapidly from one page to another (guest-side).
       takeUntil(guestToHost$.pipe(filter(({ type }) => [guestCheckIn.type, guestCheckOut.type].includes(type)))),
-      switchMap((obj: { model: ContentInstance; modelLookup: LookupTable<ContentInstance> }) => {
+      switchMap((modelResponse) => {
         let requests: Array<Observable<ContentInstance>> = [];
-        let sandboxItemPaths = [];
+        let sandboxItemPaths = []; // Used to collect the paths to fetch the sandbox items corresponding to the Content Instances.
         let sandboxItemPathLookup = {};
-        Object.values(obj.modelLookup).forEach((model) => {
+        Object.values(modelResponse.modelLookup).forEach((model) => {
           if (model.craftercms.path) {
             sandboxItemPaths.push(model.craftercms.path);
             sandboxItemPathLookup[model.craftercms.path] = true;
@@ -235,36 +228,51 @@ const issueDescriptorRequest = (props) => {
             });
           }
         });
+        Object.keys(modelResponse.unflattenedPaths).forEach((path) => {
+          sandboxItemPaths.push(path);
+          requests.push(fetchContentInstance(site, path, contentTypes));
+        });
         return forkJoin({
           sandboxItems: fetchItemsByPath(site, sandboxItemPaths),
-          models: requests.length
+          modelResponse: requests.length
             ? forkJoin(requests).pipe(
                 map((response) => {
-                  let lookup = obj.modelLookup;
                   response.forEach((contentInstance) => {
-                    lookup = {
-                      ...lookup,
-                      [contentInstance.craftercms.id]: contentInstance
-                    };
+                    if (contentInstance.craftercms.path in modelResponse.unflattenedPaths) {
+                      // Complete the object reference with the freshly-fetched instance and add it to the modelLookup.
+                      // This relies on object references inside the lookup objects being referenced by the unflattenedPaths.
+                      // i.e. unflattenedPaths is a shortcut to the objects withing the guts of the models on the modelLookup.
+                      modelResponse.modelLookup[contentInstance.craftercms.id] = Object.assign(
+                        modelResponse.unflattenedPaths[contentInstance.craftercms.path],
+                        contentInstance
+                      );
+                    } else {
+                      modelResponse.modelLookup[contentInstance.craftercms.id] = contentInstance;
+                    }
                   });
-                  return {
-                    ...obj,
-                    modelLookup: lookup
-                  };
+                  return modelResponse;
                 })
               )
-            : of(obj)
+            : of(modelResponse)
         });
       })
     )
-    .subscribe(({ sandboxItems, models: { model, modelLookup } }) => {
+    .subscribe(({ sandboxItems, modelResponse }) => {
+      const { model, modelLookup } = modelResponse;
       const normalizedModels = normalizeModelsLookup(modelLookup);
       const hierarchyMap = createModelHierarchyDescriptorMap(normalizedModels, contentTypes);
       const normalizedModel = normalizedModels[model.craftercms.id];
       const modelIdByPath = {};
       Object.values(modelLookup).forEach((model) => {
-        // Embedded components don't have a path.
-        if (model.craftercms.path) {
+        if (
+          // Embedded components don't have a path.
+          model.craftercms.path &&
+          // Items that weren't flattened and their path doesn't contain their id, would come with a `null` id.
+          model.craftercms.id &&
+          // Not-flattened items whose file name is their id, would have id/path filled up but the rest of props null.
+          // Technically, just this line might be sufficient. Could evaluate remove the id check.
+          model.craftercms.contentTypeId
+        ) {
           modelIdByPath[model.craftercms.path] = model.craftercms.id;
         }
       });
@@ -307,34 +315,22 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
   const store = useStore<GlobalState>();
   const { id: siteId, uuid } = useActiveSite() ?? {};
   const user = useActiveUser();
-  const {
-    guest,
-    editMode,
-    highlightMode,
-    editModePadding,
-    icePanelWidth,
-    toolsPanelWidth,
-    hostSize,
-    showToolsPanel,
-    xbDetectionTimeoutMs
-  } = usePreviewState();
+  const username = user?.username;
+  const { guest, editMode, highlightMode, editModePadding, icePanelWidth, toolsPanelWidth, hostSize, showToolsPanel } =
+    usePreviewState();
   const item = useCurrentPreviewItem();
   const { currentUrlPath } = usePreviewNavigation();
   const contentTypes = useContentTypes();
+  const contentTypes$Ref = useRef<BehaviorSubject<Record<string, ContentType>>>();
   const { authoringBase, guestBase, xsrfArgument } = useSelection((state) => state.env);
   const priorState = useRef({ site: siteId });
   const { enqueueSnackbar } = useSnackbar();
   const { formatMessage } = useIntl();
-  const { active: authActive } = useAuth();
   const models = guest?.models;
   const modelIdByPath = guest?.modelIdByPath;
   const hierarchyMap = guest?.hierarchyMap;
+  const mainModelModifier = guest?.mainModelModifier;
   const requestedSourceMapPaths = useRef({});
-  const guestDetectionTimeoutRef = useRef<number>();
-  const [guestDetectionSnackbarOpen, setGuestDetectionSnackbarOpen] = useState(false);
-  const { socketConnected } = useEnv();
-  const socketConnectionTimeoutRef = useRef<number>();
-  const [socketConnectionSnackbarOpen, setSocketConnectionSnackbarOpen] = useState(false);
   const currentItemPath = guest?.path;
   const uiConfig = useSiteUIConfig();
   const { cdataEscapedFieldPatterns } = uiConfig;
@@ -348,7 +344,7 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
     dataSourceActionsListInitialState
   );
   const conditionallyToggleEditMode = (nextHighlightMode?: HighlightMode) => {
-    if (item && !isItemLockedForMe(item, user.username) && hasEditAction(item.availableActions)) {
+    if (item && !isItemLockedForMe(item, username) && hasEditAction(item.availableActions)) {
       dispatch(
         setPreviewEditMode({
           // If switching from highlight modes (all vs move), we just want to switch modes without turning off edit mode.
@@ -404,6 +400,7 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
           break;
         case 'r':
           getHostToGuestBus().next(reloadRequest());
+          getHostToHostBus().next(reloadRequest());
           break;
         case 'E':
           dispatch(
@@ -447,7 +444,7 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
     },
     env,
     xbCompatConsoleWarningPrinted: false,
-    xbDetectionTimeoutMs
+    contentTypes$: contentTypes$Ref.current
   });
 
   const onRtePickerResult = (payload?: { path: string; name: string }) => {
@@ -460,21 +457,12 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
 
   useEffect(() => {
     if (nnou(uiConfig.xml)) {
-      const storedEditMode = getStoredEditModeChoice(user.username, uuid);
-      const storedHighlightMode = getStoredHighlightModeChoice(user.username, uuid);
-      const storedPaddingMode = getStoredEditModePadding(user.username);
+      const storedEditMode = getStoredEditModeChoice(username, uuid);
+      const storedHighlightMode = getStoredHighlightModeChoice(username, uuid);
+      const storedPaddingMode = getStoredEditModePadding(username);
       dispatch(initPreviewConfig({ configXml: uiConfig.xml, storedEditMode, storedHighlightMode, storedPaddingMode }));
     }
-  }, [uiConfig.xml, user.username, uuid, dispatch]);
-
-  useEffect(() => {
-    if (!socketConnected && authActive) {
-      startCommunicationDetectionTimeout(socketConnectionTimeoutRef, setSocketConnectionSnackbarOpen);
-    } else {
-      clearTimeout(socketConnectionTimeoutRef.current);
-      setSocketConnectionSnackbarOpen(false);
-    }
-  }, [socketConnected, authActive]);
+  }, [uiConfig.xml, username, uuid, dispatch]);
 
   // Legacy Guest pencil repaint - When the guest screen size changes, pencils need to be repainted.
   useEffect(() => {
@@ -492,10 +480,12 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
   useEffect(() => {
     // FYI. Path navigator refresh triggers this effect too due to item changing.
     if (item) {
-      const mode = getComputedEditMode({ item, username: user.username, editMode });
+      const mode =
+        getComputedEditMode({ item, username: username, editMode }) &&
+        (mainModelModifier == null || mainModelModifier.username === username);
       getHostToGuestBus().next(setPreviewEditMode({ editMode: mode }));
     }
-  }, [item, editMode, user.username, dispatch]);
+  }, [item, editMode, username, dispatch, mainModelModifier]);
 
   // Fetch active item
   useEffect(() => {
@@ -512,12 +502,6 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
     }
   }, [rteConfig]);
 
-  useEffect(() => {
-    if (xbDetectionTimeoutMs) {
-      startCommunicationDetectionTimeout(guestDetectionTimeoutRef, setGuestDetectionSnackbarOpen, xbDetectionTimeoutMs);
-    }
-  }, [xbDetectionTimeoutMs]);
-
   // Document domain restoring.
   useMount(() => {
     return () => {
@@ -527,11 +511,11 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
 
   // Retrieve stored site clipboard, retrieve stored tools panel page.
   useEffect(() => {
-    const localClipboard = getStoredClipboard(uuid, user.username);
+    const localClipboard = getStoredClipboard(uuid, username);
     if (localClipboard) {
       let hours = moment().diff(moment(localClipboard.timestamp), 'hours');
       if (hours >= 24) {
-        removeStoredClipboard(uuid, user.username);
+        removeStoredClipboard(uuid, username);
       } else {
         dispatch(
           restoreClipboard({
@@ -542,11 +526,13 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
         );
       }
     }
-  }, [dispatch, uuid, user.username]);
+  }, [dispatch, uuid, username]);
 
   // Post content types
   useEffect(() => {
     contentTypes && getHostToGuestBus().next(contentTypesResponse({ contentTypes: Object.values(contentTypes) }));
+    if (!contentTypes$Ref.current) contentTypes$Ref.current = new BehaviorSubject(contentTypes);
+    contentTypes$Ref.current.next(contentTypes);
   }, [contentTypes]);
 
   // region guestToHost$ subscription
@@ -580,6 +566,10 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
       // endregion
       const { type, payload } = action;
       const permissions = user?.permissionsBySite[siteId];
+      const contentTypes$ = upToDateRefs.current.contentTypes$.pipe(
+        filter((contentTypes) => Boolean(contentTypes)),
+        take(1)
+      );
       switch (type) {
         case guestSiteLoad.type:
         case guestCheckIn.type:
@@ -610,8 +600,6 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
               }
             }
           }
-          clearTimeout(guestDetectionTimeoutRef.current);
-          setGuestDetectionSnackbarOpen(false);
           break;
       }
       switch (type) {
@@ -620,14 +608,16 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
           const { url, location } = payload;
           const path = getPathFromPreviewURL(url);
           dispatch(guestCheckIn({ location, site: siteId, path }));
-          issueDescriptorRequest({
-            site: siteId,
-            path,
-            contentTypes,
-            requestedSourceMapPaths,
-            dispatch,
-            completeAction: fetchPrimaryGuestModelComplete,
-            permissions
+          contentTypes$.subscribe((contentTypes) => {
+            issueDescriptorRequest({
+              site: siteId,
+              path,
+              contentTypes,
+              requestedSourceMapPaths,
+              dispatch,
+              completeAction: fetchPrimaryGuestModelComplete,
+              permissions
+            });
           });
           break;
         }
@@ -654,39 +644,38 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
           break;
         }
         // endregion
-        case guestCheckIn.type:
-        case fetchGuestModel.type: {
-          if (type === guestCheckIn.type) {
-            getHostToGuestBus().next(
-              hostCheckIn({
-                editMode: false,
-                username: upToDateRefs.current.user.username,
-                highlightMode: upToDateRefs.current.highlightMode,
-                authoringBase: upToDateRefs.current.authoringBase,
-                site: upToDateRefs.current.siteId,
-                editModePadding: upToDateRefs.current.editModePadding,
-                rteConfig: upToDateRefs.current.rteConfig ?? {}
-              })
-            );
-            dispatch(guestCheckIn(payload));
+        case guestCheckIn.type: {
+          getHostToGuestBus().next(
+            hostCheckIn({
+              editMode: false,
+              username: upToDateRefs.current.user.username,
+              highlightMode: upToDateRefs.current.highlightMode,
+              authoringBase: upToDateRefs.current.authoringBase,
+              site: upToDateRefs.current.siteId,
+              editModePadding: upToDateRefs.current.editModePadding,
+              rteConfig: upToDateRefs.current.rteConfig ?? {}
+            })
+          );
+          dispatch(guestCheckIn(payload));
 
-            if (payload.documentDomain) {
-              try {
-                document.domain = payload.documentDomain;
-              } catch (e) {
-                console.error(e);
-              }
-            } else if (document.domain !== originalDocDomain) {
-              document.domain = originalDocDomain;
+          // TODO: Remove *all* document domain related stuff for `develop`
+          if (payload.documentDomain) {
+            try {
+              document.domain = payload.documentDomain;
+            } catch (e) {
+              console.error(e);
             }
+          } else if (document.domain !== originalDocDomain) {
+            document.domain = originalDocDomain;
+          }
 
-            if (payload.__CRAFTERCMS_GUEST_LANDING__) {
-              nnou(siteId) && dispatch(changeCurrentUrl('/'));
-            } else {
-              const path = payload.path;
+          if (payload.__CRAFTERCMS_GUEST_LANDING__) {
+            nnou(siteId) && dispatch(changeCurrentUrl('/'));
+          } else {
+            const path = payload.path;
 
-              contentTypes && hostToGuest$.next(contentTypesResponse({ contentTypes: Object.values(contentTypes) }));
-
+            contentTypes$.subscribe((contentTypes) => {
+              hostToGuest$.next(contentTypesResponse({ contentTypes: Object.values(contentTypes) }));
               issueDescriptorRequest({
                 site: siteId,
                 path,
@@ -696,9 +685,13 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
                 completeAction: fetchPrimaryGuestModelComplete,
                 permissions
               });
-            }
-          } /* else if (type === FETCH_GUEST_MODEL) */ else {
-            if (payload.path?.startsWith('/')) {
+            });
+          }
+          break;
+        }
+        case fetchGuestModel.type: {
+          if (payload.path?.startsWith('/')) {
+            contentTypes$.subscribe((contentTypes) => {
               issueDescriptorRequest({
                 site: siteId,
                 path: payload.path,
@@ -708,20 +701,15 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
                 completeAction: fetchGuestModelComplete,
                 permissions
               });
-            } else {
-              return console.warn(`Ignoring FETCH_GUEST_MODEL request since "${payload.path}" is not a valid path.`);
-            }
+            });
+          } else {
+            return console.warn(`Ignoring FETCH_GUEST_MODEL request since "${payload.path}" is not a valid path.`);
           }
           break;
         }
         case guestCheckOut.type: {
           requestedSourceMapPaths.current = {};
           dispatch(action);
-          startCommunicationDetectionTimeout(
-            guestDetectionTimeoutRef,
-            setGuestDetectionSnackbarOpen,
-            upToDateRefs.current.xbDetectionTimeoutMs
-          );
           break;
         }
         case sortItemOperation.type: {
@@ -783,8 +771,10 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
             create = false
           } = payload as InsertComponentOperationPayload;
           let { modelId, parentModelId } = payload;
+          const model = models[parentModelId ?? modelId];
           const path = models[modelId ?? parentModelId].craftercms.path;
-          const contentType = contentTypes[instance.craftercms.contentTypeId];
+          const instanceContentType = contentTypes[instance.craftercms.contentTypeId];
+          const parentContentType = contentTypes[model.craftercms.contentTypeId];
 
           if (isInheritedField(models[modelId], fieldId)) {
             modelId = getModelIdFromInheritedField(models[modelId], fieldId, modelIdByPath);
@@ -803,12 +793,13 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
             ? // region insertComponent
               insertComponent(
                 siteId,
+                models[parentModelId ? parentModelId : modelId].craftercms.path,
                 modelId,
                 fieldId,
                 targetIndex,
-                contentType,
+                parentContentType,
                 instance,
-                models[parentModelId ? parentModelId : modelId].craftercms.path,
+                instanceContentType,
                 shared,
                 shouldSerializeFn
               )
@@ -816,18 +807,19 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
               // region insertInstance
               insertInstance(
                 siteId,
+                models[parentModelId ? parentModelId : modelId].craftercms.path,
                 modelId,
                 fieldId,
                 targetIndex,
-                instance,
-                models[parentModelId ? parentModelId : modelId].craftercms.path
+                parentContentType,
+                instance
               );
           // endregion
 
           // Writing the xml document for the component being inserted only applies to new & shared.
           if (shared && create) {
             let postWriteObs = serviceObservable;
-            serviceObservable = writeInstance(siteId, instance, contentType, shouldSerializeFn).pipe(
+            serviceObservable = writeInstance(siteId, instance, instanceContentType, shouldSerializeFn).pipe(
               switchMap(() => postWriteObs)
             );
           }
@@ -965,10 +957,14 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
           let { modelId, parentModelId } = payload;
           const path = models[modelId ?? parentModelId].craftercms.path;
 
-          if (isInheritedField(models[modelId], fieldId)) {
-            modelId = getModelIdFromInheritedField(models[modelId], fieldId, modelIdByPath);
-            parentModelId = findParentModelId(modelId, hierarchyMap, models);
-          }
+          ({ modelId, parentModelId } = getInheritanceParentIdsForField(
+            fieldId,
+            models,
+            modelId,
+            parentModelId,
+            modelIdByPath,
+            hierarchyMap
+          ));
 
           deleteItem(
             siteId,
@@ -1308,7 +1304,8 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
                   >
                     <RefreshRounded />
                   </IconButton>
-                )
+                ),
+                autoHideDuration: 10000
               }
             );
           }
@@ -1336,13 +1333,6 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
   useEffect(() => {
     if (priorState.current.site !== siteId) {
       priorState.current.site = siteId;
-      if (xbDetectionTimeoutMs) {
-        startCommunicationDetectionTimeout(
-          guestDetectionTimeoutRef,
-          setGuestDetectionSnackbarOpen,
-          xbDetectionTimeoutMs
-        );
-      }
       if (guest) {
         // Changing the site will force-reload the iFrame and 'beforeunload'
         // event won't trigger withing; guest won't be submitting it's own checkout
@@ -1350,7 +1340,7 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
         dispatch(guestCheckOut({ path: guest.path }));
       }
     }
-  }, [siteId, guest, dispatch, xbDetectionTimeoutMs]);
+  }, [siteId, guest, dispatch]);
 
   // Initialize RTE config
   useEffect(() => {
@@ -1392,45 +1382,6 @@ export function PreviewConcierge(props: PropsWithChildren<{}>) {
           dispatch(clearSelectForEdit());
           getHostToGuestBus().next(clearSelectedZones());
         }}
-      />
-      <Snackbar
-        open={guestDetectionSnackbarOpen}
-        onClose={() => void 0}
-        message={
-          <FormattedMessage
-            id="guestDetectionMessage"
-            defaultMessage="Communication with the preview application was interrupted. Studio will continue to retry the connection."
-          />
-        }
-        anchorOrigin={{
-          vertical: 'bottom',
-          horizontal: 'center'
-        }}
-        action={
-          <IconButton color="secondary" size="small" onClick={() => setGuestDetectionSnackbarOpen(false)}>
-            <CloseRounded />
-          </IconButton>
-        }
-      />
-      <Snackbar
-        open={socketConnectionSnackbarOpen}
-        onClose={() => void 0}
-        sx={(theme) => ({ ...(guestDetectionSnackbarOpen ? { bottom: `${theme.spacing(10)} !important` } : {}) })}
-        message={
-          <FormattedMessage
-            id="socketConnectionIssue"
-            defaultMessage="Connection with the server was interrupted. Studio will continue to retry the connection."
-          />
-        }
-        anchorOrigin={{
-          vertical: 'bottom',
-          horizontal: 'center'
-        }}
-        action={
-          <IconButton color="secondary" size="small" onClick={() => setSocketConnectionSnackbarOpen(false)}>
-            <CloseRounded />
-          </IconButton>
-        }
       />
       <KeyboardShortcutsDialog
         open={keyboardShortcutsDialogState.open}

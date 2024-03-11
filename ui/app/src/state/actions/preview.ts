@@ -27,7 +27,7 @@ import {
   SearchResult
 } from '../../models/Search';
 import { ContentTypeDropTarget } from '../../models/ContentTypeDropTarget';
-import { WidgetDescriptor } from '../../models';
+import { ContentEventPayload, WidgetDescriptor } from '../../models';
 import LookupTable from '../../models/LookupTable';
 import { DetailedItem, SandboxItem } from '../../models/Item';
 import GlobalState, { HighlightMode } from '../../models/GlobalState';
@@ -57,7 +57,8 @@ export const guestCheckIn = /*#__PURE__*/ createAction<{
   version?: string;
 }>('GUEST_CHECK_IN');
 export const guestCheckOut = /*#__PURE__*/ createAction<{ path: string }>('GUEST_CHECK_OUT');
-export const fetchGuestModel = /*#__PURE__*/ createAction('FETCH_GUEST_MODEL');
+export const fetchGuestModel = /*#__PURE__*/ createAction<{ path: string }>('FETCH_GUEST_MODEL');
+// TODO: type `guestSiteLoad` payload on `develop`
 export const guestSiteLoad = /*#__PURE__*/ createAction('GUEST_SITE_LOAD'); // Legacy guest check in
 export const sortItemOperation = /*#__PURE__*/ createAction<
   {
@@ -459,3 +460,7 @@ export const setHighlightMode = /*#__PURE__*/ createAction<{ highlightMode: High
 export const goToLastPage = /*#__PURE__*/ createAction<string>('GO_TO_LAST_PAGE');
 export const goToNextPage = /*#__PURE__*/ createAction('GO_TO_NEXT_PAGE');
 // endregion
+
+export const mainModelModifiedExternally = /*#__PURE__*/ createAction<ContentEventPayload>(
+  'MAIN_MODEL_MODIFIED_EXTERNALLY'
+);

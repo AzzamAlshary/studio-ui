@@ -62,13 +62,14 @@
     "@types/react": "^18.0.28",
     "browserslist": "^4.21.5",
     "caniuse-lite": "^1.0.30001451",
+    "clsx": "^2.1.0",
     "react-is": "^18.2.0",
     "ansi-regex": "^5.0.1",
     "json5": "^2.2.2",
     "nth-check": "^2.0.1",
     "semver": "^7.5.2"
   },
-  "packageManager": "yarn@3.1.0",
+  "packageManager": "yarn@4.0.2",
   "scripts": {
     "prettier:raw": "node scripts/prettier.js",
     "prettier:all": "node scripts/prettier.js write",

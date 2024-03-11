@@ -26,9 +26,6 @@ import IconButton from '@mui/material/IconButton';
 import { useDispatch } from 'react-redux';
 import LookupTable from '../../models/LookupTable';
 import { PublishingStatus } from '../../models/Publishing';
-import { merge } from 'rxjs';
-import { fetchStatus } from '../../services/publishing';
-import { map } from 'rxjs/operators';
 import { Site } from '../../models/Site';
 import { setSiteCookie } from '../../utils/auth';
 import { trash } from '../../services/sites';
@@ -49,7 +46,6 @@ import { foo, nnou } from '../../utils/object';
 import { useEnv } from '../../hooks/useEnv';
 import { useActiveUser } from '../../hooks/useActiveUser';
 import { useLogicResource } from '../../hooks/useLogicResource';
-import { useMount } from '../../hooks/useMount';
 import { useSpreadState } from '../../hooks/useSpreadState';
 import { useSitesBranch } from '../../hooks/useSitesBranch';
 import Paper from '@mui/material/Paper';
@@ -77,10 +73,7 @@ export function SiteManagement() {
   const [currentView, setCurrentView] = useState<'grid' | 'list'>(
     getStoredGlobalMenuSiteViewPreference(user.username) ?? 'grid'
   );
-  const sitesBranch = useSitesBranch();
-  const sitesById = sitesBranch.byId;
-  const isFetching = sitesBranch.isFetching;
-  const [publishingStatusLookup, setPublishingStatusLookup] = useSpreadState<LookupTable<PublishingStatus>>({});
+  const { byId: sitesById, isFetching, active } = useSitesBranch();
   const [selectedSiteStatus, setSelectedSiteStatus] = useState<PublishingStatus>(null);
   const [permissionsLookup, setPermissionsLookup] = useState<LookupTable<boolean>>(foo);
   const [sitesRefreshCountLookup, setSitesRefreshCountLookup] = useSpreadState<LookupTable<number>>({});
@@ -89,23 +82,11 @@ export function SiteManagement() {
   const [isDuplicateDialogFromCreateDialog, setIsDuplicateDialogFromCreateDialog] = useState(false);
 
   useEffect(() => {
-    merge(
-      ...Object.keys(sitesById).map((siteId) =>
-        fetchStatus(siteId).pipe(
-          map((status) => ({
-            status,
-            siteId
-          }))
-        )
-      )
-    ).subscribe(({ siteId, status }) => {
-      setPublishingStatusLookup({ [siteId]: status });
-    });
-  }, [setPublishingStatusLookup, sitesById]);
-
-  useMount(() => {
-    hasGlobalPermissions('create_site', 'edit_site', 'delete_site', 'duplicate_site').subscribe(setPermissionsLookup);
-  });
+    const subscription = hasGlobalPermissions('create_site', 'edit_site', 'delete_site', 'duplicate_site').subscribe(
+      setPermissionsLookup
+    );
+    return () => subscription.unsubscribe();
+  }, []);
 
   const resource = useLogicResource<Site[], { sitesById: LookupTable<Site>; isFetching: boolean }>(
     useMemo(
@@ -140,11 +121,11 @@ export function SiteManagement() {
   };
 
   const onDeleteSiteClick = (site: Site) => {
-    trash(site.id).subscribe(
-      () => {
+    trash(site.id).subscribe({
+      next() {
         dispatch(
           batchActions([
-            popSite({ siteId: site.id }),
+            popSite({ siteId: site.id, isActive: site.id === active }),
             showSystemNotification({
               message: formatMessage(translations.siteDeleted)
             }),
@@ -152,10 +133,10 @@ export function SiteManagement() {
           ])
         );
       },
-      ({ response: { response } }) => {
+      error({ response: { response } }) {
         dispatch(showErrorDialog({ error: response }));
       }
-    );
+    });
   };
 
   const onEditSiteClick = (site: Site) => {
@@ -186,10 +167,14 @@ export function SiteManagement() {
     );
   };
 
-  const onPublishButtonClick = (event: React.MouseEvent<HTMLButtonElement, MouseEvent>, site: Site) => {
+  const onPublishButtonClick = (
+    event: React.MouseEvent<HTMLButtonElement, MouseEvent>,
+    site: Site,
+    status: PublishingStatus
+  ) => {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedSiteStatus(publishingStatusLookup[site.id]);
+    setSelectedSiteStatus(status);
     publishingStatusDialogState.onOpen();
   };
 
@@ -298,7 +283,6 @@ export function SiteManagement() {
         >
           <SitesGrid
             resource={resource}
-            publishingStatusLookup={publishingStatusLookup}
             onSiteClick={onSiteClick}
             onDeleteSiteClick={permissionsLookup['delete_site'] && onDeleteSiteClick}
             onEditSiteClick={permissionsLookup['edit_site'] && onEditSiteClick}

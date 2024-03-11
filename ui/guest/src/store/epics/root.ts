@@ -31,12 +31,13 @@ import { not } from '../../utils/util';
 import { post } from '../../utils/communicator';
 import * as iceRegistry from '../../iceRegistry';
 import { getById, getReferentialEntries, isTypeAcceptedAsByField } from '../../iceRegistry';
-import { beforeWrite$, dragOk, unwrapEvent } from '../util';
+import { beforeWrite$, checkIfLockedOrModified, dragOk, unwrapEvent } from '../util';
 import * as contentController from '../../contentController';
 import {
   createContentInstance,
   getCachedModel,
   getCachedModels,
+  getCachedModelsByPath,
   getCachedSandboxItem,
   getModelIdFromInheritedField,
   isInheritedField,
@@ -99,6 +100,7 @@ import { processPathMacros } from '@craftercms/studio-ui/utils/path';
 import { uploadDataUrl } from '@craftercms/studio-ui/services/content';
 import { getRequestForgeryToken } from '@craftercms/studio-ui/utils/auth';
 import { ensureSingleSlash } from '@craftercms/studio-ui/utils/string';
+import { getInheritanceParentIdsForField } from '@craftercms/studio-ui/utils/content';
 
 const createReader$ = (file: File) =>
   new Observable((subscriber: Subscriber<ProgressEvent<FileReader>>) => {
@@ -138,7 +140,10 @@ const epic = combineEpics<GuestStandardAction, GuestStandardAction, GuestState>(
           payload: { event, record }
         } = action;
         const iceId = state.draggable?.[record.id];
-        if (nullOrUndefined(iceId)) {
+        const { isLocked, isExternallyModified } = checkIfLockedOrModified(state, record);
+        if (isLocked || isExternallyModified) {
+          return NEVER;
+        } else if (nullOrUndefined(iceId)) {
           // When the drag starts on a child element of the item, it passes through here.
           console.error('No ice id found for this drag instance.', record, state.draggable);
         } else if (not(iceId)) {
@@ -503,7 +508,10 @@ const epic = combineEpics<GuestStandardAction, GuestStandardAction, GuestState>(
       ),
       switchMap(([action, state]) => {
         const { record, event } = action.payload;
-        if (state.highlightMode === HighlightMode.ALL && state.status === EditingStatus.LISTENING) {
+        const { isLocked, isExternallyModified } = checkIfLockedOrModified(state, record);
+        if (isLocked || isExternallyModified) {
+          return NEVER;
+        } else if (state.highlightMode === HighlightMode.ALL && state.status === EditingStatus.LISTENING) {
           let selected = {
             modelId: null,
             fieldId: [],
@@ -663,22 +671,44 @@ const epic = combineEpics<GuestStandardAction, GuestStandardAction, GuestState>(
   },
   // endregion
   // region trashed
-  (action$: Observable<GuestStandardAction<{ iceId: number }>>) => {
+  (action$: Observable<GuestStandardAction<{ iceId: number }>>, state$) => {
     // onDrop doesn't execute when trashing on host side
     // Consider behaviour when running Host Guest-side
     return action$.pipe(
       ofType(trashed.type),
-      tap((action) => {
+      withLatestFrom(state$),
+      switchMap(([action, state]) => {
         const { iceId } = action.payload;
         let { modelId, fieldId, index } = iceRegistry.getById(iceId);
-        contentController.deleteItem(modelId, fieldId, index);
-        post(instanceDragEnded());
-      }),
-      // There's a raise condition where sometimes the dragend is
-      // fired and sometimes is not upon dropping on the rubbish bin.
-      // Manually firing here may incur in double firing of computed_dragend
-      // in those occasions.
-      map(() => computedDragEnd())
+        const models = getCachedModels();
+        let parentModelId = getParentModelId(modelId, models, modelHierarchyMap);
+        const { username, activeSite } = state;
+        ({ modelId, parentModelId } = getInheritanceParentIdsForField(
+          fieldId,
+          models,
+          modelId,
+          parentModelId,
+          getCachedModelsByPath(),
+          modelHierarchyMap
+        ));
+        const pathToLock = models[parentModelId ? parentModelId : modelId].craftercms.path;
+        return beforeWrite$({
+          path: pathToLock,
+          site: activeSite,
+          username,
+          localItem: getCachedSandboxItem(pathToLock)
+        }).pipe(
+          switchMap(() => {
+            contentController.deleteItem(modelId, fieldId, index);
+            post(instanceDragEnded());
+            // There's a raise condition where sometimes the dragend is
+            // fired and sometimes is not upon dropping on the rubbish bin.
+            // Manually firing here may incur in double firing of computed_dragend
+            // in those occasions.
+            return of(computedDragEnd());
+          })
+        );
+      })
     );
   },
   // endregion

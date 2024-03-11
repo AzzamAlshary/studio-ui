@@ -38,14 +38,12 @@ import { ItemMenuStateProps } from '../components/ItemActionsMenu';
 import { ItemMegaMenuStateProps } from '../components/ItemMegaMenu';
 import { LauncherStateProps } from '../components/Launcher';
 import { PublishingStatusDialogStateProps } from '../components/PublishingStatusDialog';
-import TranslationOrText from './TranslationOrText';
 import { SystemIconDescriptor } from '../components/SystemIcon';
 import { AjaxError } from 'rxjs/ajax';
 import { PathNavigatorTreeStateProps } from '../components/PathNavigatorTree';
 import { UnlockPublisherDialogStateProps } from '../components/UnlockPublisherDialog';
 import { WidgetDialogStateProps } from '../components/WidgetDialog/utils';
 import { CodeEditorDialogStateProps } from '../components/CodeEditorDialog/utils';
-import { SystemLinkId } from '../utils/system';
 import { PublishDialogStateProps } from '../components/PublishDialog/utils';
 import { DeleteDialogStateProps } from '../components/DeleteDialog/utils';
 import { CreateFolderStateProps } from '../components/CreateFolderDialog/utils';
@@ -66,6 +64,7 @@ import { SingleFileUploadDialogStateProps } from '../components/SingleFileUpload
 import { ModelHierarchyMap } from '../utils/content';
 import { UIBlockerStateProps } from '../components/UIBlocker';
 import { RenameAssetStateProps } from '../components/RenameAssetDialog';
+import Person from './Person';
 
 export type HighlightMode = 'all' | 'move';
 
@@ -93,6 +92,11 @@ export interface GuestData {
   path: string;
   selected: EditSelection[];
   itemBeingDragged: boolean;
+  /**
+   * Stores the modifier person for the main XB model from the moment is loaded (guest check's in) onwards.
+   * used to determine if the content item was modified in the background and it editing should be disabled.
+   */
+  mainModelModifier: Person;
 }
 
 // TODO:
@@ -266,6 +270,7 @@ export interface GlobalState {
     cdataEscapedFieldPatterns: string[];
     references: LookupTable;
     xml: string;
+    remoteGitBranch: string;
   };
   pathNavigator: LookupTable<PathNavigatorStateProps>;
   pathNavigatorTree: LookupTable<PathNavigatorTreeStateProps>;
