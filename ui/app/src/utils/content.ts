@@ -19,7 +19,7 @@ import { getStateMapFromLegacyItem } from './state';
 import { nnou, nou, reversePluckProps } from './object';
 import { ContentType, ContentTypeField } from '../models/ContentType';
 import LookupTable from '../models/LookupTable';
-import ContentInstance from '../models/ContentInstance';
+import ContentInstance, { ContentInstanceBase } from '../models/ContentInstance';
 import { deserialize, getInnerHtml, getInnerHtmlNumber, wrapElementInAuxDocument } from './xml';
 import { fileNameFromPath, unescapeHTML } from './string';
 import { getRootPath, isRootPath, withIndex, withoutIndex } from './path';
@@ -393,20 +393,20 @@ export function parseContentXML(
     id = null;
   }
   const contentTypeId = nnou(doc) ? getInnerHtml(doc.querySelector(':scope > content-type')) : null;
-  const current = {
+  const current: ContentInstanceBase = {
     craftercms: {
       id,
       path,
       label: null,
-      locale: null,
       dateCreated: null,
       dateModified: null,
-      contentTypeId: contentTypeId,
+      contentTypeId,
       disabled: false,
       sourceMap: {}
     }
   };
-  if (id === null && unflattenedPaths) {
+  // We're assuming that contentTypeId is null when the content is not flattened
+  if (contentTypeId === null && unflattenedPaths) {
     unflattenedPaths[path] = current;
   }
   if (nnou(doc)) {
@@ -572,16 +572,20 @@ function parseElementByContentType(
       return getInnerHtml(element) === 'true';
     case 'numeric-input':
       return getInnerHtmlNumber(element, parseFloat);
-    case 'transcoded-video-picker':
-    case 'taxonomy-selector':
-      return getInnerHtml(element);
     default:
-      console.log(
-        `%c[parseElementByContentType] Missing type "${type}" on switch statement for field "${field.id}".`,
-        'color: blue',
-        element
-      );
-      return getInnerHtml(element);
+      !['transcoded-video', 'transcoded-video-picker', 'taxonomy-selector'].includes(type) &&
+        console.log(
+          `%c[parseElementByContentType] Missing type "${type}" on switch statement for field "${field.id}".`,
+          'color: blue',
+          element
+        );
+      try {
+        const extract: any = deserialize(element)?.[element.tagName] ?? '';
+        return extract.item ? (Array.isArray(extract.item) ? extract.item : [extract.item]) : extract;
+      } catch (e) {
+        console.error('[parseElementByContentType] Error deserializing element', element, e);
+        return getInnerHtml(element);
+      }
   }
 }
 
@@ -1138,4 +1142,50 @@ export function getInheritanceParentIdsForField(
     ids.parentModelId = findParentModelId(modelId, hierarchyMap, modelLookup);
   }
   return ids;
+}
+
+export interface GeneratePlaceholderImageDataUrlArgs {
+  width: number;
+  height: number;
+  fillStyle: string;
+  textFillStyle: string;
+  text: string;
+  textPositionX: number;
+  textPositionY: number;
+  font: string;
+  textAlign: CanvasTextAlign;
+}
+
+export function generatePlaceholderImageDataUrl(attributes?: Partial<GeneratePlaceholderImageDataUrlArgs>): string {
+  let attrs: GeneratePlaceholderImageDataUrlArgs = Object.assign(
+    {
+      width: 300,
+      height: 150,
+      fillStyle: '#f0f0f0',
+      text: 'Sample Image',
+      textPositionX: 150,
+      textPositionY: 88.24,
+      textFillStyle: 'black',
+      font: '30px Arial',
+      textAlign: 'center'
+    },
+    attributes
+  );
+
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  canvas.width = attrs.width;
+  canvas.height = attrs.height;
+
+  // Set background color
+  context.fillStyle = attrs.fillStyle;
+  context.fillRect(0, 0, attrs.width, attrs.height);
+
+  // Render text
+  context.font = attrs.font;
+  context.fillStyle = attrs.textFillStyle;
+  context.textAlign = attrs.textAlign;
+  context.fillText(attrs.text, attrs.textPositionX, attrs.textPositionY);
+
+  return canvas.toDataURL();
 }
