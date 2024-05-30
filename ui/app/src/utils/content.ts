@@ -149,6 +149,7 @@ export function isBlobUrl(url: string): boolean {
 }
 
 /**
+ * TODO: Remove?
  * Returns the boolean intersection of editMode, lock status and the item's edit permission
  */
 export function getComputedEditMode({
@@ -563,10 +564,15 @@ function parseElementByContentType(
     case 'textarea':
       return getInnerHtml(element, { applyLegacyUnescaping: true });
     case 'image':
-    case 'dropdown':
     case 'date-time':
     case 'time':
       return getInnerHtml(element);
+    case 'dropdown':
+      if (field.id.endsWith('_i') || field.id.endsWith('_f')) {
+        return getInnerHtmlNumber(element, parseFloat);
+      } else {
+        return getInnerHtml(element);
+      }
     case 'boolean':
     case 'page-nav-order':
       return getInnerHtml(element) === 'true';
@@ -964,6 +970,14 @@ export const createItemActionMap: (availableActions: number) => ItemActionsMap =
   rejectPublish: hasPublishRejectAction(value)
 });
 
+/**
+ * Given an item lookup table, tries to find the path with and without the "/index.xml" portion of the path.
+ * This reconciles path differences when working with pages between folder and index (i.e. /site/website vs /site/website/index.xml),
+ * which refer to the same item in most contexts.
+ * path {string} The path to look for
+ * lookupTable {Record<string, T>} The map-like object containing all items in which to look the path up
+ * @returns {T} The item if found, undefined otherwise
+ **/
 export function lookupItemByPath<T = DetailedItem>(path: string, lookupTable: LookupTable<T>): T {
   return lookupTable[withIndex(path)] ?? lookupTable[withoutIndex(path)];
 }
@@ -1083,7 +1097,14 @@ export function applyAssetNameRules(name: string, options?: { allowBraces: boole
  * letter, number, dash or underscore.
  */
 export function applyContentNameRules(name: string): string {
-  return name.replace(/[^a-z0-9-_]/g, '');
+  return slugify(name, {
+    lower: true,
+    // Setting `strict: true` would disallow `_`, which we don't want.
+    strict: false,
+    // Because of the moment where the library trims, `trim: true` caused undesired replacement of `-`
+    // at the beginning or end of the slug.
+    trim: false
+  }).replace(/[^a-z0-9-_]/g, '');
 }
 
 export const openItemEditor = (

@@ -21,6 +21,7 @@ import LookupTable from '../models/LookupTable';
 import ContentType from '../models/ContentType';
 import { SystemType } from '../models';
 import { v4 as uuid } from 'uuid';
+import { ensureSingleSlash } from './string';
 
 // Originally from ComponentPanel.getPreviewPagePath
 export function getPathFromPreviewURL(previewURL: string): string {
@@ -81,7 +82,7 @@ export function parseQueryString(): ParsedQuery {
 }
 
 export function withoutIndex(path: string): string {
-  return path.replace('/index.xml', '');
+  return path?.replace('/index.xml', '');
 }
 
 export function withIndex(path: string): string {
@@ -298,6 +299,7 @@ export function getControllerPath(type: SystemType): string {
   return `/scripts/${type === 'page' ? 'pages' : 'components'}`;
 }
 
+const availableMacrosRegex = /{(objectId|objectGroupId|objectGroupId2|year|month|yyyy|mm|dd|parentPath(\[[0-9]+])?)}/;
 export function processPathMacros(dependencies: {
   path: string;
   objectId: string;
@@ -306,7 +308,18 @@ export function processPathMacros(dependencies: {
   fullParentPath?: string;
 }): string {
   let { path, objectId, objectGroupId, useUUID, fullParentPath } = dependencies;
+  if (!path) return path;
+
   let processedPath = path;
+
+  // Remove unrecognized macros.
+  const pathMacros = processedPath.match(/\{([^{}]+)}/g) ?? [];
+  pathMacros.forEach((macro) => {
+    if (!availableMacrosRegex.test(macro)) {
+      processedPath = processedPath.replace(macro, '');
+    }
+  });
+  processedPath = ensureSingleSlash(processedPath);
 
   // The objectGroupId is the first 4 characters of the objectId, so compute if not provided.
   if (objectGroupId === undefined && objectId) {
@@ -317,7 +330,7 @@ export function processPathMacros(dependencies: {
     if (useUUID) {
       processedPath = processedPath.replace('{objectId}', uuid());
     } else {
-      processedPath = path.replace('{objectId}', objectId);
+      processedPath = processedPath.replace('{objectId}', objectId);
     }
   }
 

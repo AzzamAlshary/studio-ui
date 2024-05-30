@@ -32,12 +32,14 @@ import { StateStylingProps } from '../../models/UiConfig';
 import LookupTable from '../../models/LookupTable';
 import {
   getEditorMode,
+  isAudio,
   isEditableViaFormEditor,
   isImage,
+  isMediaContent,
   isNavigable,
+  isPdfDocument,
   isPreviewable,
-  isVideo,
-  isPdfDocument
+  isVideo
 } from '../PathNavigator/utils';
 import ContextMenu, { ContextMenuOption } from '../ContextMenu/ContextMenu';
 import { getNumOfMenuOptionsForItem, lookupItemByPath } from '../../utils/content';
@@ -56,7 +58,7 @@ import { useItemsByPath } from '../../hooks/useItemsByPath';
 import { useSubject } from '../../hooks/useSubject';
 import { debounceTime } from 'rxjs/operators';
 import { useActiveSite } from '../../hooks/useActiveSite';
-import { ApiResponse, GetChildrenOptions } from '../../models';
+import { SimpleAjaxError, ApiResponse, GetChildrenOptions } from '../../models';
 import { batchActions } from '../../state/actions/misc';
 import SystemType from '../../models/SystemType';
 import { PathNavigatorTreeItemProps } from './PathNavigatorTreeItem';
@@ -94,6 +96,7 @@ export interface PathNavigatorTreeStateProps {
   limit: number;
   expanded: string[];
   childrenByParentPath: LookupTable<string[]>;
+  errorByPath: Record<string, SimpleAjaxError>;
   keywordByPath: LookupTable<string>;
   totalByPath: LookupTable<number>;
   offsetByPath: LookupTable<number>;
@@ -167,7 +170,9 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
   const keywordByPath = state?.keywordByPath;
   const totalByPath = state?.totalByPath;
   const childrenByParentPath = state?.childrenByParentPath;
-  const rootItem = lookupItemByPath(rootPath, itemsByPath);
+  const errorByPath = state?.errorByPath;
+  const getItemByPath = (path: string) => lookupItemByPath(path, itemsByPath);
+  const rootItem = getItemByPath(rootPath);
 
   useEffect(() => {
     // Adding uiConfig as means to stop navigator from trying to
@@ -224,15 +229,11 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
   const onNodeLabelClick =
     onNodeClick ??
     ((event: React.MouseEvent<Element, MouseEvent>, path: string) => {
-      if (isNavigable(itemsByPath[path])) {
-        dispatch(
-          previewItem({
-            item: itemsByPath[path],
-            newTab: event.ctrlKey || event.metaKey
-          })
-        );
-      } else if (isPreviewable(itemsByPath[path])) {
-        onPreview(itemsByPath[path]);
+      const item = getItemByPath(path);
+      if (isNavigable(item)) {
+        dispatch(previewItem({ item, newTab: event.ctrlKey || event.metaKey }));
+      } else if (isPreviewable(item)) {
+        onPreview(item);
       } else {
         onToggleNodeClick(path);
       }
@@ -243,8 +244,7 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
     if (state.expanded.includes(path)) {
       dispatch(pathNavigatorTreeCollapsePath({ id, path }));
     } else {
-      const childrenCount = itemsByPath[path].childrenCount;
-      if (childrenCount) {
+      if (getItemByPath(path)?.childrenCount) {
         // If the item's children have been loaded, should simply be expanded
         if (childrenByParentPath[path]) {
           dispatch(pathNavigatorTreeExpandPath({ id, path }));
@@ -274,7 +274,7 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
         path,
         anchorReference: 'anchorPosition',
         anchorPosition: { top, left },
-        loaderItems: getNumOfMenuOptionsForItem(itemsByPath[path])
+        loaderItems: getNumOfMenuOptionsForItem(getItemByPath(path))
       })
     );
   };
@@ -312,10 +312,10 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
   const onPreview = (item: DetailedItem) => {
     if (isEditableViaFormEditor(item)) {
       dispatch(showEditDialog({ path: item.path, authoringBase, site: siteId, readonly: true }));
-    } else if (isImage(item) || isVideo(item) || isPdfDocument(item.mimeType)) {
+    } else if (isMediaContent(item.mimeType) || isPdfDocument(item.mimeType)) {
       dispatch(
         showPreviewDialog({
-          type: isImage(item) ? 'image' : isVideo(item) ? 'video' : 'pdf',
+          type: isImage(item) ? 'image' : isVideo(item) ? 'video' : isAudio(item) ? 'audio' : 'pdf',
           title: item.label,
           url: item.path
         })
@@ -351,6 +351,7 @@ export function PathNavigatorTree(props: PathNavigatorTreeProps) {
         keywordByPath={keywordByPath}
         totalByPath={totalByPath}
         childrenByParentPath={childrenByParentPath}
+        errorByPath={errorByPath}
         expandedNodes={state?.expanded}
         onIconClick={onToggleNodeClick}
         onLabelClick={onNodeLabelClick}

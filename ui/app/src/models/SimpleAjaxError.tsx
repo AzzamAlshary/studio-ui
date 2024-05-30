@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2007-2023 Crafter Software Corporation. All Rights Reserved.
+ * Copyright (C) 2007-2024 Crafter Software Corporation. All Rights Reserved.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 3 as published by
@@ -14,6 +14,18 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-const list = ['4.1.5', '4.1.4', '4.1.3', '4.1.2', '4.1.1', '4.1.0', '4.0.3'];
+import ApiResponse from './ApiResponse';
 
-export default list;
+/**
+ * Essentially a redeclaration of `Omit<AjaxError, 'request' | 'xhr'>`. Mainly removes
+ * non-serializables from AjaxError and allows typing of the `response` property.
+ **/
+export interface SimpleAjaxError<T = ApiResponse> {
+  message: string;
+  name: string;
+  response: T;
+  responseType: string;
+  status: number;
+}
+
+export default SimpleAjaxError;
